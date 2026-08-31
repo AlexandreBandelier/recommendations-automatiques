@@ -21,16 +21,44 @@ wcapi = API(
 )
 
 def fetch_completed_orders():
-    """Récupère l'historique des commandes terminées avec pagination dynamique."""
+    """Récupère une tranche de l'historique (depuis 2018) en fonction du jour pour couvrir 100% du passé sans dépasser le temps limite."""
     orders = []
     page = 1
-    print("Récupération des commandes WooCommerce...")
     
+    # Années à couvrir depuis 2018
+    start_year = 2018
+    current_year = datetime.datetime.now().year
+    
+    # Alternance des périodes basées sur le jour de l'année
+    day_of_year = datetime.datetime.now().timetuple().tm_yday
+    years_range = list(range(start_year, current_year + 1))
+    
+    # On découpe les années en 5 tranches historiques
+    chunk_size = max(1, len(years_range) // 5)
+    slice_idx = day_of_year % 5
+    
+    selected_years = years_range[slice_idx * chunk_size : (slice_idx + 1) * chunk_size]
+    if not selected_years:
+        selected_years = [current_year]
+        
+    after_date = f"{selected_years[0]}-01-01T00:00:00"
+    before_date = f"{selected_years[-1]}-12-31T23:59:59"
+    
+    print(f"Analyse de l'historique pour la période : {selected_years[0]} à {selected_years[-1]}...")
+
     while True:
         try:
-            response = wcapi.get("orders", params={"per_page": 100, "page": page, "status": "completed"})
+            params = {
+                "per_page": 100,
+                "page": page,
+                "status": "completed",
+                "after": after_date,
+                "before": before_date
+            }
+            response = wcapi.get("orders", params=params)
+            
             if response.status_code != 200:
-                print(f"Erreur lors de la récupération (page {page}) : HTTP {response.status_code}")
+                print(f"Fin de la récupération (HTTP {response.status_code})")
                 break
             
             data = response.json()
@@ -38,18 +66,17 @@ def fetch_completed_orders():
                 break
             
             orders.extend(data)
+            print(f"Page {page} récupérée ({len(data)} commandes)")
             
-            total_pages = int(response.headers.get("X-WP-TotalPages", page))
-            if page >= total_pages or len(data) < 100:
+            if len(data) < 100:
                 break
             page += 1
         except Exception as e:
-            print(f"Exception rencontrée lors de la récupération des commandes : {e}")
+            print(f"Exception lors de la récupération : {e}")
             break
 
-    print(f"{len(orders)} commandes récupérées au total.")
+    print(f"Total récupéré pour cette tranche : {len(orders)} commandes.")
     return orders
-
 def calculate_recommendations(orders):
     """Calcul basique des recommandations par co-occurrence."""
     pairs = defaultdict(Counter)
