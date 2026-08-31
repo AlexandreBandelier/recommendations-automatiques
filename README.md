@@ -1,2 +1,2 @@
 # recommendations-automatiques
-Recommendations automatiques cross-selling/upselling
+Recommendations automatiques cross-selling
