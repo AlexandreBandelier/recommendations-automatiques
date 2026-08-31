@@ -5,23 +5,27 @@ import requests
 from woocommerce import API
 from collections import defaultdict, Counter
 
-WOO_URL = os.environ.get("WOO_URL", "").rstrip("/")
-WOO_CLIENT = os.environ.get("WOO_CLIENT")
-WOO_SECRET = os.environ.get("WOO_SECRET")
-RECS_API_TOKEN = os.environ.get("RECS_API_TOKEN")
-
-wcapi = API(
-    url=WOO_URL,
-    consumer_key=WOO_CLIENT,
-    consumer_secret=WOO_SECRET,
-    version="wc/v3",
-    timeout=60
-)
+# Liste de tes différents sites WooCommerce
+SITES = [
+    {
+        "id": "site_1",
+        "url": os.environ.get("WOO_URL_1", "").rstrip("/"),
+        "client": os.environ.get("WOO_CLIENT_1"),
+        "secret": os.environ.get("WOO_SECRET_1"),
+        "token": os.environ.get("RECS_API_TOKEN_1")
+    },
+    # {
+    #     "id": "site_2",
+    #     "url": os.environ.get("WOO_URL_2", "").rstrip("/"),
+    #     "client": os.environ.get("WOO_CLIENT_2"),
+    #     "secret": os.environ.get("WOO_SECRET_2"),
+    #     "token": os.environ.get("RECS_API_TOKEN_2")
+    # }
+]
 
 KNOWN_BRANDS = ["tokaido", "adidas", "arawaza", "venum", "kamikaze", "kaze", "hayashi", "shureido", "budo-nord"]
-CACHE_FILE = "orders_cache.json"
 
-def fetch_products_catalog():
+def fetch_products_catalog(wcapi):
     products_meta = {}
     page = 1
     print("Chargement des métadonnées du catalogue produits...")
@@ -41,6 +45,7 @@ def fetch_products_catalog():
                         "id": p.get("id"),
                         "name": p.get("name", "").lower(),
                         "categories": categories,
+                        "categories_set": set(categories), # OPTIMISATION 2 : set pré-calculé pour accélérer les tests
                         "sku": sku,
                         "price": float(p.get("price") or 0.0),
                         "stock_status": p.get("stock_status", "instock")
@@ -54,22 +59,23 @@ def fetch_products_catalog():
     print(f"Métadonnées chargées pour {len(products_meta)} produits.")
     return products_meta
 
-def fetch_incremental_orders():
-    """Charge le cache existant et récupère uniquement les commandes manquantes."""
+def fetch_incremental_orders(wcapi, site_id):
+    """Charge le cache, récupère les commandes manquantes et nettoie les doublons (OPTIMISATION 1)."""
+    cache_file = f"orders_cache_{site_id}.json"
     existing_orders = []
     after_date = "2018-01-01T00:00:00"
 
-    if os.path.exists(CACHE_FILE):
+    if os.path.exists(cache_file):
         try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            with open(cache_file, "r", encoding="utf-8") as f:
                 existing_orders = json.load(f)
                 if existing_orders:
                     dates = [o.get("date_created") for o in existing_orders if o.get("date_created")]
                     if dates:
                         after_date = max(dates)
-                        print(f"Cache trouvé. Dernier historique enregistré : {after_date}")
+                        print(f"Cache trouvé pour {site_id}. Dernier historique : {after_date}")
         except Exception as e:
-            print(f"Erreur lecture cache : {e}")
+            print(f"Erreur lecture cache {site_id} : {e}")
 
     print(f"Récupération des nouvelles commandes depuis : {after_date}...")
     new_orders = []
@@ -97,13 +103,18 @@ def fetch_incremental_orders():
             print(f"Erreur récupération commandes : {e}")
             break
 
-    existing_ids = {o["id"] for o in existing_orders}
-    truly_new = [o for o in new_orders if o["id"] not in existing_ids]
-    
-    all_orders = existing_orders + truly_new
-    print(f"Ajout de {len(truly_new)} nouvelles commandes. Total en mémoire : {len(all_orders)}")
+    # OPTIMISATION 1 : Utilisation stricte d'un dictionnaire indexé par ID pour purger tout doublon potentiel
+    orders_dict = {o["id"]: o for o in existing_orders}
+    new_count = 0
+    for o in new_orders:
+        if o["id"] not in orders_dict:
+            orders_dict[o["id"]] = o
+            new_count += 1
 
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+    all_orders = list(orders_dict.values())
+    print(f"Ajout de {new_count} nouvelles commandes. Total consolidé : {len(all_orders)}")
+
+    with open(cache_file, "w", encoding="utf-8") as f:
         json.dump(all_orders, f, ensure_ascii=False, indent=2)
 
     return all_orders
@@ -111,10 +122,12 @@ def fetch_incremental_orders():
 def check_category_compatibility(main_meta, rel_meta):
     if rel_meta.get("stock_status") != "instock":
         return False
-    m_cats = set(main_meta.get("categories", []))
-    r_cats = set(rel_meta.get("categories", []))
-    m_name = main_meta.get("name", "")
-    r_name = rel_meta.get("name", "")
+    
+    # OPTIMISATION 2 : Utilisation des sets pré-calculés
+    m_cats = main_meta["categories_set"]
+    r_cats = rel_meta["categories_set"]
+    m_name = main_meta["name"]
+    r_name = rel_meta["name"]
 
     strict_disciplines = {"kobudo", "yoseikan", "yoseikan budo", "nanbudo"}
     if m_cats.intersection(strict_disciplines) != r_cats.intersection(strict_disciplines):
@@ -175,21 +188,21 @@ def calculate_recommendations(orders, products_meta):
 
         # 2. Fallback Catégories / Marques / Prix
         if len(valid_recs) < 4:
-            main_cats = set(main_meta.get("categories", []))
-            main_price = main_meta.get("price", 0.0)
+            main_cats = main_meta["categories_set"]
+            main_price = main_meta["price"]
             fallback_candidates = []
 
             for fallback_sku, fallback_meta in products_meta.items():
                 if fallback_sku == main_sku or fallback_sku in valid_recs:
                     continue
-                fallback_cats = set(fallback_meta.get("categories", []))
+                fallback_cats = fallback_meta["categories_set"]
                 if main_cats.intersection(fallback_cats) and check_category_compatibility(main_meta, fallback_meta):
                     score = 0
                     main_brand = next((b for b in KNOWN_BRANDS if b in main_meta["name"]), None)
                     fallback_brand = next((b for b in KNOWN_BRANDS if b in fallback_meta["name"]), None)
                     if main_brand and main_brand == fallback_brand:
                         score += 50
-                    fb_price = fallback_meta.get("price", 0.0)
+                    fb_price = fallback_meta["price"]
                     if main_price > 0:
                         ratio = fb_price / main_price
                         if 0.8 <= ratio <= 1.3:
@@ -212,19 +225,20 @@ def calculate_recommendations(orders, products_meta):
                     break
 
         recommendations[main_sku] = valid_recs
+        
+        # OPTIMISATION 3 : Traçabilité détaillée pour vérification rapide
         print(f"[PRODUIT] {main_sku} -> 4 recs : {valid_recs}")
 
     return recommendations
 
-def push_to_wordpress_in_batches(recs, batch_size=50):
-    """Envoie les recommandations par paquets pour éviter les erreurs de timeout (504)."""
+def push_to_wordpress_in_batches(recs, site_url, token, batch_size=50):
     if not recs:
         return
         
-    url = f"{WOO_URL}/wp-json/custom/v1/update-recommendations"
+    url = f"{site_url}/wp-json/custom/v1/update-recommendations"
     headers = {
         "Content-Type": "application/json",
-        "X-Recommendation-Token": RECS_API_TOKEN
+        "X-Recommendation-Token": token
     }
     
     items = list(recs.items())
@@ -232,17 +246,30 @@ def push_to_wordpress_in_batches(recs, batch_size=50):
     
     for i in range(0, total_items, batch_size):
         batch = dict(items[i:i + batch_size])
-        print(f"Envoi d'un lot de {len(batch)} produits (du {i+1} au {min(i+batch_size, total_items)} sur {total_items})...")
+        print(f"Envoi d'un lot de {len(batch)} produits vers {site_url}...")
         
         try:
             response = requests.post(url, json=batch, headers=headers, timeout=60)
             response.raise_for_status()
-            print(f"Lot validé par WordPress : {response.text}")
+            print(f"Lot validé : {response.text}")
         except requests.exceptions.RequestException as e:
             print(f"Erreur sur ce lot : {e}")
 
 if __name__ == "__main__":
-    products_meta = fetch_products_catalog()
-    orders = fetch_incremental_orders()
-    recs = calculate_recommendations(orders, products_meta)
-    push_to_wordpress_in_batches(recs)
+    for site in SITES:
+        if not site["url"] or not site["client"]:
+            continue
+        print(f"\n=== Traitement du site : {site['url']} ===")
+        
+        wcapi = API(
+            url=site["url"],
+            consumer_key=site["client"],
+            consumer_secret=site["secret"],
+            version="wc/v3",
+            timeout=60
+        )
+        
+        products_meta = fetch_products_catalog(wcapi)
+        orders = fetch_incremental_orders(wcapi, site["id"])
+        recs = calculate_recommendations(orders, products_meta)
+        push_to_wordpress_in_batches(recs, site["url"], site["token"])
