@@ -1,16 +1,15 @@
 import os
 import datetime
+import json
 import requests
 from woocommerce import API
 from collections import defaultdict, Counter
 
-# Configuration et Nettoyage de l'URL
 WOO_URL = os.environ.get("WOO_URL", "").rstrip("/")
 WOO_CLIENT = os.environ.get("WOO_CLIENT")
 WOO_SECRET = os.environ.get("WOO_SECRET")
 RECS_API_TOKEN = os.environ.get("RECS_API_TOKEN")
 
-# Connexion à l'API WooCommerce
 wcapi = API(
     url=WOO_URL,
     consumer_key=WOO_CLIENT,
@@ -19,25 +18,21 @@ wcapi = API(
     timeout=60
 )
 
-# Liste des marques courantes en arts martiaux pour la détection
 KNOWN_BRANDS = ["tokaido", "adidas", "arawaza", "venum", "kamikaze", "kaze", "hayashi", "shureido", "budo-nord"]
+CACHE_FILE = "orders_cache.json"
 
 def fetch_products_catalog():
-    """Récupère l'ensemble du catalogue pour appliquer les règles sur les catégories, le prix et le stock."""
     products_meta = {}
     page = 1
-    print("Chargement des métadonnées du catalogue produits (Catégories, Prix, Stocks)...")
-    
+    print("Chargement des métadonnées du catalogue produits...")
     while True:
         try:
             response = wcapi.get("products", params={"per_page": 100, "page": page, "status": "publish"})
             if response.status_code != 200:
                 break
-            
             data = response.json()
             if not data or not isinstance(data, list):
                 break
-            
             for p in data:
                 sku = p.get("sku")
                 if sku:
@@ -50,25 +45,36 @@ def fetch_products_catalog():
                         "price": float(p.get("price") or 0.0),
                         "stock_status": p.get("stock_status", "instock")
                     }
-            
             if len(data) < 100:
                 break
             page += 1
         except Exception as e:
-            print(f"Erreur chargement catalogue : {e}")
+            print(f"Erreur catalogue : {e}")
             break
-
     print(f"Métadonnées chargées pour {len(products_meta)} produits.")
     return products_meta
 
-def fetch_completed_orders():
-    """Récupère l'intégralité de l'historique des commandes depuis 2018 d'un seul coup."""
-    orders = []
-    page = 1
+def fetch_incremental_orders():
+    """Charge le cache existant et récupère uniquement les commandes manquantes."""
+    existing_orders = []
     after_date = "2018-01-01T00:00:00"
-    
-    print("Récupération de l'intégralité de l'historique des commandes (depuis 2018)...")
 
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                existing_orders = json.load(f)
+                if existing_orders:
+                    dates = [o.get("date_created") for o in existing_orders if o.get("date_created")]
+                    if dates:
+                        after_date = max(dates)
+                        print(f"Cache trouvé. Dernier historique enregistré : {after_date}")
+        except Exception as e:
+            print(f"Erreur lecture cache : {e}")
+
+    print(f"Récupération des nouvelles commandes depuis : {after_date}...")
+    new_orders = []
+    page = 1
+    
     while True:
         try:
             params = {
@@ -78,184 +84,165 @@ def fetch_completed_orders():
                 "after": after_date
             }
             response = wcapi.get("orders", params=params)
-            
             if response.status_code != 200:
-                print(f"Fin de la récupération (HTTP {response.status_code})")
                 break
-            
             data = response.json()
             if not data or not isinstance(data, list):
                 break
-            
-            orders.extend(data)
-            print(f"Page {page} récupérée ({len(data)} commandes)...")
-            
+            new_orders.extend(data)
             if len(data) < 100:
                 break
             page += 1
         except Exception as e:
-            print(f"Exception lors de la récupération : {e}")
+            print(f"Erreur récupération commandes : {e}")
             break
 
-    print(f"Total récupéré : {len(orders)} commandes analysées sur tout l'historique.")
-    return orders
+    existing_ids = {o["id"] for o in existing_orders}
+    truly_new = [o for o in new_orders if o["id"] not in existing_ids]
+    
+    all_orders = existing_orders + truly_new
+    print(f"Ajout de {len(truly_new)} nouvelles commandes. Total en mémoire : {len(all_orders)}")
+
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(all_orders, f, ensure_ascii=False, indent=2)
+
+    return all_orders
 
 def check_category_compatibility(main_meta, rel_meta):
-    """Vérification stricte basée sur les catégories formelles et mots-clés du titre."""
-    # [OPTIMISATION 1] : Ne jamais recommander un produit hors stock
     if rel_meta.get("stock_status") != "instock":
         return False
-
-    m_cats = set(c for c in main_meta.get("categories", []))
-    r_cats = set(c for c in rel_meta.get("categories", []))
+    m_cats = set(main_meta.get("categories", []))
+    r_cats = set(rel_meta.get("categories", []))
     m_name = main_meta.get("name", "")
     r_name = rel_meta.get("name", "")
 
-    # 1. Isolation stricte des disciplines
     strict_disciplines = {"kobudo", "yoseikan", "yoseikan budo", "nanbudo"}
-    m_strict = m_cats.intersection(strict_disciplines)
-    r_strict = r_cats.intersection(strict_disciplines)
-    if m_strict or r_strict:
-        if m_strict != r_strict:
-            return False
+    if m_cats.intersection(strict_disciplines) != r_cats.intersection(strict_disciplines):
+        return False
 
-    # 2. Kata vs Protections
     is_m_kata = any("kata" in c for c in m_cats) or "kata" in m_name
     is_r_protection = any(c in r_cats for c in ["protections", "gants", "protège-tibias", "casques", "plastrons"])
     if is_m_kata and is_r_protection:
         return False
 
-    # 3. Enfants vs Adultes
     is_m_kid = any(kw in m_name or any(kw in c for c in m_cats) for kw in ["enfant", "junior", "kid"])
     is_r_kid = any(kw in r_name or any(kw in c for c in r_cats) for kw in ["enfant", "junior", "kid"])
     neutral_categories = {"sacs", "bagagerie", "accessoires", "matériel club", "soin", "ceintures"}
-    if is_m_kid != is_r_kid:
-        if not r_cats.intersection(neutral_categories):
-            return False
-
-    # 4. Niveau : Initiation vs WKF Compétition
-    is_m_comp = any(kw in m_name or any(kw in c for c in m_cats) for kw in ["wkf", "compétition", "competition"])
-    is_r_init = any(kw in r_name or any(kw in c for c in r_cats) for kw in ["initiation", "débutant", "debutant"])
-    if is_m_comp and is_r_init:
+    if is_m_kid != is_r_kid and not r_cats.intersection(neutral_categories):
         return False
 
-    # 5. Non-redondance (pas la même sous-catégorie exacte sauf consommables)
-    if m_cats == r_cats and not any(c in m_cats for c in ["accessoires", "ceintures", "soin"]):
-        return False
-
-    # [OPTIMISATION 2] : Isolation Homme / Femme
-    is_m_fem = "femme" in m_name or "féminin" in m_name or "feminin" in m_name or "fille" in m_name
+    is_m_fem = "femme" in m_name or "féminin" in m_name or "fille" in m_name
     is_m_hom = "homme" in m_name or "masculin" in m_name or "garçon" in m_name
-    is_r_fem = "femme" in r_name or "féminin" in r_name or "feminin" in r_name or "fille" in r_name
+    is_r_fem = "femme" in r_name or "féminin" in r_name or "fille" in r_name
     is_r_hom = "homme" in r_name or "masculin" in r_name or "garçon" in r_name
-    
     if (is_m_fem and is_r_hom) or (is_m_hom and is_r_fem):
         return False
 
     return True
 
 def calculate_recommendations(orders, products_meta):
-    """Calcule les paires et remplit jusqu'à 4 recommandations intelligentes."""
     pairs = defaultdict(Counter)
+    global_sales = Counter()
     
     for order in orders:
         skus = [item['sku'] for item in order.get('line_items', []) if item.get('sku')]
+        for sku in skus:
+            global_sales[sku] += 1
         for i in range(len(skus)):
             for j in range(len(skus)):
                 if i != j:
                     pairs[skus[i]][skus[j]] += 1
 
+    best_sellers_list = [sku for sku, count in global_sales.most_common() if sku in products_meta]
+    if not best_sellers_list:
+        best_sellers_list = list(products_meta.keys())
+
     recommendations = {}
 
-    for main_sku, related_counts in pairs.items():
-        if main_sku not in products_meta:
-            continue
-            
-        main_meta = products_meta[main_sku]
+    for main_sku, main_meta in products_meta.items():
         valid_recs = []
+        related_counts = pairs[main_sku]
 
-        # Analyse du comportement d'achat
+        # 1. Historique d'achats communs
         for rel_sku, count in related_counts.most_common(15):
             if rel_sku not in products_meta or rel_sku == main_sku:
                 continue
-            
-            rel_meta = products_meta[rel_sku]
-            
-            # Règle d'or : On valide si + de 2 commandes communes OU si le filtrage strict est respecté
-            if count >= 2 or check_category_compatibility(main_meta, rel_meta):
-                valid_recs.append(rel_sku)
-                if len(valid_recs) == 4:
-                    break
+            if count >= 2 or check_category_compatibility(main_meta, products_meta[rel_sku]):
+                if rel_sku not in valid_recs:
+                    valid_recs.append(rel_sku)
+            if len(valid_recs) == 4:
+                break
 
-        # Fallback intelligent si l'historique ne suffit pas (< 3 produits)
-        if len(valid_recs) < 3:
+        # 2. Fallback Catégories / Marques / Prix
+        if len(valid_recs) < 4:
             main_cats = set(main_meta.get("categories", []))
             main_price = main_meta.get("price", 0.0)
-            
             fallback_candidates = []
 
             for fallback_sku, fallback_meta in products_meta.items():
                 if fallback_sku == main_sku or fallback_sku in valid_recs:
                     continue
-                
                 fallback_cats = set(fallback_meta.get("categories", []))
-                
-                # Vérification croisée des catégories et des règles
                 if main_cats.intersection(fallback_cats) and check_category_compatibility(main_meta, fallback_meta):
                     score = 0
-                    
-                    # [OPTIMISATION 3.A] : Affinité de Marque (Brand Matching)
                     main_brand = next((b for b in KNOWN_BRANDS if b in main_meta["name"]), None)
                     fallback_brand = next((b for b in KNOWN_BRANDS if b in fallback_meta["name"]), None)
                     if main_brand and main_brand == fallback_brand:
-                        score += 50  # Énorme bonus pour recommander la même marque
-
-                    # [OPTIMISATION 3.B] : Cohérence de Prix / Up-Sell Naturel
+                        score += 50
                     fb_price = fallback_meta.get("price", 0.0)
                     if main_price > 0:
                         ratio = fb_price / main_price
                         if 0.8 <= ratio <= 1.3:
-                            score += 20  # Prix similaire à légèrement plus cher (idéal)
-                        elif ratio > 1.5:
-                            score -= 10  # Pénalité si beaucoup trop cher
-
+                            score += 20
                     fallback_candidates.append((score, fallback_sku))
 
-            # Trier les candidats par score de pertinence décroissant
             fallback_candidates.sort(key=lambda x: x[0], reverse=True)
-            
-            for score, f_sku in fallback_candidates:
-                valid_recs.append(f_sku)
+            for _, f_sku in fallback_candidates:
+                if f_sku not in valid_recs:
+                    valid_recs.append(f_sku)
                 if len(valid_recs) == 4:
                     break
 
-        if len(valid_recs) >= 3:
-            recommendations[main_sku] = valid_recs
+        # 3. Remplissage ultime par les Best-Sellers
+        if len(valid_recs) < 4:
+            for b_sku in best_sellers_list:
+                if b_sku != main_sku and b_sku not in valid_recs and products_meta[b_sku].get("stock_status") == "instock":
+                    valid_recs.append(b_sku)
+                if len(valid_recs) == 4:
+                    break
+
+        recommendations[main_sku] = valid_recs
+        print(f"[PRODUIT] {main_sku} -> 4 recs : {valid_recs}")
 
     return recommendations
 
-def push_to_wordpress(recs):
-    """Envoie la totalité des recommandations à l'endpoint API de WordPress."""
+def push_to_wordpress_in_batches(recs, batch_size=50):
+    """Envoie les recommandations par paquets pour éviter les erreurs de timeout (504)."""
     if not recs:
-        print("Aucune recommandation à envoyer.")
         return
-
+        
     url = f"{WOO_URL}/wp-json/custom/v1/update-recommendations"
     headers = {
         "Content-Type": "application/json",
         "X-Recommendation-Token": RECS_API_TOKEN
     }
     
-    print(f"Envoi global de {len(recs)} produits mis à jour vers WordPress...")
-    try:
-        response = requests.post(url, json=recs, headers=headers, timeout=120)
-        response.raise_for_status()
-        print(f"Succès — Réponse WordPress ({response.status_code}) : {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"Erreur lors de l'envoi vers WordPress : {e}")
+    items = list(recs.items())
+    total_items = len(items)
+    
+    for i in range(0, total_items, batch_size):
+        batch = dict(items[i:i + batch_size])
+        print(f"Envoi d'un lot de {len(batch)} produits (du {i+1} au {min(i+batch_size, total_items)} sur {total_items})...")
+        
+        try:
+            response = requests.post(url, json=batch, headers=headers, timeout=60)
+            response.raise_for_status()
+            print(f"Lot validé par WordPress : {response.text}")
+        except requests.exceptions.RequestException as e:
+            print(f"Erreur sur ce lot : {e}")
 
 if __name__ == "__main__":
     products_meta = fetch_products_catalog()
-    orders = fetch_completed_orders()
+    orders = fetch_incremental_orders()
     recs = calculate_recommendations(orders, products_meta)
-    push_to_wordpress(recs)
+    push_to_wordpress_in_batches(recs)
