@@ -31,7 +31,7 @@ jobs:
       - name: Exécution du script de recommandations
         env:
           WOO_URL: ${{ secrets.WOO_URL }}
-          WOO_KEY: ${{ secrets.WOO_KEY }}
+          WOO_CLIENT: ${{ secrets.WOO_CLIENT }}
           WOO_SECRET: ${{ secrets.WOO_SECRET }}
           RECS_API_TOKEN: ${{ secrets.RECS_API_TOKEN }}
         run: python scripts/generate_recommendations.py
