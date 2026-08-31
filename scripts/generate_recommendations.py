@@ -51,22 +51,57 @@ def fetch_completed_orders():
     print(f"{len(orders)} commandes récupérées au total.")
     return orders
 
-def calculate_recommendations(orders):
-    """Calcule les paires de produits fréquemment achetés ensemble par SKU."""
+def calculate_recommendations_with_rules(orders, products_metadata):
+    """
+    Calcule les cross-sells avec des règles strictes de compatibilité et de volume.
+    """
     pairs = defaultdict(Counter)
+    
+    # 1. Comptage des co-occurrences dans les commandes
     for order in orders:
         skus = [item['sku'] for item in order.get('line_items', []) if item.get('sku')]
         for i in range(len(skus)):
             for j in range(len(skus)):
                 if i != j:
                     pairs[skus[i]][skus[j]] += 1
-                    
+
     recommendations = {}
-    for sku, related_counts in pairs.items():
-        top_related = [rel_sku for rel_sku, count in related_counts.most_common(3) if count >= 2]
-        if top_related:
-            recommendations[sku] = top_related
-            
+
+    for main_sku, related_counts in pairs.items():
+        main_meta = products_metadata.get(main_sku, {})
+        main_category = main_meta.get('category')
+        
+        valid_recs = []
+
+        # 2. Filtrage par règles métier
+        for rel_sku, count in related_counts.most_common(10):
+            rel_meta = products_metadata.get(rel_sku, {})
+            rel_category = rel_meta.get('category')
+
+            # Règle Kobudo : uniquement du Kobudo
+            if main_category == "Kobudo" and rel_category != "Kobudo":
+                continue
+
+            # Règle Kata : pas de gants ou protège-tibias
+            if "kata" in main_meta.get('name', '').lower() and "gant" in rel_meta.get('name', '').lower():
+                continue
+
+            valid_recs.append(rel_sku)
+            if len(valid_recs) == 4:  # Max 4 cross-sells
+                break
+
+        # 3. Quota minimum : si moins de 3 recommendations, compléter avec la même catégorie
+        if len(valid_recs) < 3 and main_category:
+            fallback_skus = [
+                sku for sku, meta in products_metadata.items()
+                if meta.get('category') == main_category and sku != main_sku and sku not in valid_recs
+            ]
+            valid_recs.extend(fallback_skus[:(4 - len(valid_recs))])
+
+        # Enregistrement final si on a au moins le quota requis
+        if len(valid_recs) >= 3:
+            recommendations[main_sku] = valid_recs
+
     return recommendations
 
 def get_current_batch(recommendations):
