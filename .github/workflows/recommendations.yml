@@ -1,0 +1,38 @@
+name: WooCommerce Auto Recommendations
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # S'exécute chaque nuit à 02:00 UTC
+  workflow_dispatch:      # Permet le déclenchement manuel pour tester
+
+concurrency:
+  group: recommendations-workflow
+  cancel-in-progress: true
+
+jobs:
+  run-recommendations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Extraction du code du dépôt
+        uses: actions/checkout@v4
+
+      - name: Configuration de Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Installation des dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install woocommerce requests
+
+      - name: Exécution du script de recommandations
+        env:
+          WOO_URL: ${{ secrets.WOO_URL }}
+          WOO_KEY: ${{ secrets.WOO_KEY }}
+          WOO_SECRET: ${{ secrets.WOO_SECRET }}
+          RECS_API_TOKEN: ${{ secrets.RECS_API_TOKEN }}
+        run: python scripts/generate_recommendations.py
