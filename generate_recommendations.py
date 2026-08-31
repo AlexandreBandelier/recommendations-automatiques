@@ -7,14 +7,14 @@ from collections import defaultdict, Counter
 
 # Nettoyage de l'URL pour éviter les problèmes de double slash
 WOO_URL = os.environ.get("WOO_URL", "").rstrip("/")
-WOO_KEY = os.environ.get("WOO_KEY")
+WOO_CLIENT = os.environ.get("WOO_CLIENT")
 WOO_SECRET = os.environ.get("WOO_SECRET")
 RECS_API_TOKEN = os.environ.get("RECS_API_TOKEN")
 
 # Connexion à l'API WooCommerce
 wcapi = API(
     url=WOO_URL,
-    consumer_key=WOO_KEY,
+    consumer_CLIENT=WOO_CLIENT,
     consumer_secret=WOO_SECRET,
     version="wc/v3",
     timeout=60
