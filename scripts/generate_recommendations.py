@@ -62,26 +62,12 @@ def fetch_products_catalog():
     return products_meta
 
 def fetch_completed_orders():
-    """Récupère une tranche de l'historique (depuis 2018) en fonction du jour."""
+    """Récupère l'intégralité de l'historique des commandes depuis 2018 d'un seul coup."""
     orders = []
     page = 1
+    after_date = "2018-01-01T00:00:00"
     
-    start_year = 2018
-    current_year = datetime.datetime.now().year
-    day_of_year = datetime.datetime.now().timetuple().tm_yday
-    
-    years_range = list(range(start_year, current_year + 1))
-    chunk_size = max(1, len(years_range) // 5)
-    slice_idx = day_of_year % 5
-    
-    selected_years = years_range[slice_idx * chunk_size : (slice_idx + 1) * chunk_size]
-    if not selected_years:
-        selected_years = [current_year]
-        
-    after_date = f"{selected_years[0]}-01-01T00:00:00"
-    before_date = f"{selected_years[-1]}-12-31T23:59:59"
-    
-    print(f"Analyse de l'historique pour la période : {selected_years[0]} à {selected_years[-1]}...")
+    print("Récupération de l'intégralité de l'historique des commandes (depuis 2018)...")
 
     while True:
         try:
@@ -89,8 +75,7 @@ def fetch_completed_orders():
                 "per_page": 100,
                 "page": page,
                 "status": "completed",
-                "after": after_date,
-                "before": before_date
+                "after": after_date
             }
             response = wcapi.get("orders", params=params)
             
@@ -103,6 +88,7 @@ def fetch_completed_orders():
                 break
             
             orders.extend(data)
+            print(f"Page {page} récupérée ({len(data)} commandes)...")
             
             if len(data) < 100:
                 break
@@ -111,13 +97,11 @@ def fetch_completed_orders():
             print(f"Exception lors de la récupération : {e}")
             break
 
-    print(f"Total récupéré pour cette tranche : {len(orders)} commandes.")
+    print(f"Total récupéré : {len(orders)} commandes analysées sur tout l'historique.")
     return orders
 
 def check_category_compatibility(main_meta, rel_meta):
-    """
-    Vérification stricte basée sur les catégories formelles et mots-clés du titre.
-    """
+    """Vérification stricte basée sur les catégories formelles et mots-clés du titre."""
     # [OPTIMISATION 1] : Ne jamais recommander un produit hors stock
     if rel_meta.get("stock_status") != "instock":
         return False
@@ -250,31 +234,10 @@ def calculate_recommendations(orders, products_meta):
 
     return recommendations
 
-def get_current_batch(recommendations):
-    """Filtre les recommandations pour n'envoyer que 10 % du catalogue selon le jour."""
-    all_skus = sorted(list(recommendations.keys()))
-    total_products = len(all_skus)
-    
-    if total_products == 0:
-        return {}
-
-    day_of_year = datetime.datetime.now().timetuple().tm_yday
-    batch_index = (day_of_year // 3) % 10
-    
-    chunk_size = max(1, total_products // 10)
-    start_idx = batch_index * chunk_size
-    end_idx = start_idx + chunk_size if batch_index < 9 else total_products
-    
-    batch_skus = all_skus[start_idx:end_idx]
-    batch_recs = {sku: recommendations[sku] for sku in batch_skus}
-    
-    print(f"Lot actuel : {batch_index + 1}/10 | Produits à mettre à jour : {len(batch_recs)} / {total_products}")
-    return batch_recs
-
-def push_to_wordpress(batch_recs):
-    """Envoie le lot de recommandations à l'endpoint API de WordPress."""
-    if not batch_recs:
-        print("Aucune recommandation à envoyer aujourd'hui.")
+def push_to_wordpress(recs):
+    """Envoie la totalité des recommandations à l'endpoint API de WordPress."""
+    if not recs:
+        print("Aucune recommandation à envoyer.")
         return
 
     url = f"{WOO_URL}/wp-json/custom/v1/update-recommendations"
@@ -283,16 +246,16 @@ def push_to_wordpress(batch_recs):
         "X-Recommendation-Token": RECS_API_TOKEN
     }
     
+    print(f"Envoi global de {len(recs)} produits mis à jour vers WordPress...")
     try:
-        response = requests.post(url, json=batch_recs, headers=headers, timeout=60)
+        response = requests.post(url, json=recs, headers=headers, timeout=120)
         response.raise_for_status()
         print(f"Succès — Réponse WordPress ({response.status_code}) : {response.text}")
     except requests.exceptions.RequestException as e:
         print(f"Erreur lors de l'envoi vers WordPress : {e}")
 
 if __name__ == "__main__":
-    products_meta = fetch_products_catalog() # Nécessaire pour avoir les catégories, les stocks et les prix
+    products_meta = fetch_products_catalog()
     orders = fetch_completed_orders()
     recs = calculate_recommendations(orders, products_meta)
-    batch = get_current_batch(recs)
-    push_to_wordpress(batch)
+    push_to_wordpress(recs)
